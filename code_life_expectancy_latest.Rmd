@@ -1,0 +1,497 @@
+---
+title: "code"
+author: "Anjani Sowmya, Trivikram, Lokesh, Manoj"
+date: "2024-11-29"
+output: html_document
+---
+
+```{r}
+data <- read.csv("Life Expectancy Data.csv")
+head(data)
+summary(data)
+```
+
+```{r}
+# Rename columns for clarity
+colnames(data) <- c("Country", "Year", "Economic_Status", "Life_Expectancy", "Adult_Mortality", 
+                    "Infant_Deaths", "Alcohol_Consumption", "Health_Expenditure", 
+                    "Hepatitis_B_Coverage", "Measles_Cases", "BMI", "Under_Five_Deaths", 
+                    "Polio_Coverage", "Total_Expenditure", "Diphtheria_Coverage", 
+                    "HIV_Prevalence", "GDP", "Population", "Thinness_10_19_Years", 
+                    "Thinness_5_9_Years", "Income_Resources", "Schooling")
+
+# Ensure numeric columns are correctly identified
+numeric_cols <- sapply(data, is.numeric)
+
+# Function to replace NA in numeric columns with the median
+replace_na_numeric <- function(x) {
+  if (is.numeric(x)) {
+    x[is.na(x)] <- median(x, na.rm = TRUE) # Replace NA with median
+  }
+  return(x)
+}
+
+# Apply the function only to numeric columns
+data[numeric_cols] <- lapply(data[numeric_cols], replace_na_numeric)
+
+# For categorical variables, replace NA with "Unknown"
+data$Economic_Status[is.na(data$Economic_Status)] <- "Unknown"
+
+# Check the summary of the cleaned dataset
+summary(data)
+
+```
+
+```{r}
+# Load necessary library
+library(dplyr)
+library(rnaturalearth)
+
+# Get a data frame of country names from rnaturalearth
+ne_countries <- ne_countries(returnclass = "sf")
+
+# Convert the dataset to a vector of country names for lookup
+ne_country_names <- ne_countries$name
+
+# Clean up the country names in the data
+data$Country <- trimws(data$Country)  # Remove any extra spaces
+
+# Replace country names in your data based on the rnaturalearth data
+data$Country <- ifelse(data$Country %in% ne_country_names, data$Country,
+                       sapply(data$Country, function(x) {
+                         match <- grep(x, ne_country_names, value = TRUE, ignore.case = TRUE)
+                         if (length(match) > 0) match[1] else x
+                       }))
+
+# Manually map any known discrepancies
+data$Country <- recode(data$Country,
+                       "Russian Federation" = "Russia",
+                       "Côte d'Ivoire" = "Ivory Coast",
+                       "Syria Arab Republic" = "Syrian Arab Republic",
+                       "The former Yugoslav republic of Macedonia" = "North Macedonia",
+                       "Democratic People's Republic of Korea" = "North Korea",
+                       "Democratic Republic of the Congo" = "Congo (Kinshasa)",
+                       "Republic of Korea" = "South Korea",
+                       "Brunei Darussalam" = "Brunei",
+                       "St. Kitts and Nevis" = "Saint Kitts and Nevis",
+                       "St. Lucia" = "Saint Lucia",
+                       "St. Vincent and the Grenadines" = "Saint Vincent and the Grenadines",
+                       "Venezuela (Bolivarian Republic of)" = "Venezuela",
+                       "Lao People's Democratic Republic" = "Laos",
+                       "Tanzania, United Republic of" = "Tanzania",
+                       "Czechia" = "Czech Republic",
+                       "Palestine, State of" = "Palestine",
+                       "Myanmar (Burma)" = "Myanmar",
+                       "South Sudan" = "Sudan (South)")
+
+# Verify the changes
+unique(data$Country)
+
+```
+
+```{r}
+library(tidyr)
+# Convert Life_Expectancy into a binary outcome (e.g., High vs Low)
+threshold <- median(data$Life_Expectancy, na.rm = TRUE)
+data$Life_Expectancy_Binary <- ifelse(data$Life_Expectancy > threshold, 1, 0)
+
+# Exclude Life_Expectancy_Binary from numerical data
+numerical_data <- data %>% select_if(is.numeric) %>% select(-Year, -Life_Expectancy )
+
+# Compute correlation of numerical variables with Life_Expectancy
+cor_life_expectancy <- numerical_data %>%
+  select(-Life_Expectancy_Binary, -Alcohol_Consumption, Population) %>%  # Exclude the binary column
+  summarise(across(everything(), ~ cor(.x, data$Life_Expectancy, use = "complete.obs")))
+
+# Convert the result into a tidy format
+cor_life_expectancy_tidy <- as.data.frame(cor_life_expectancy) %>%
+  gather(key = "Variable", value = "Correlation")
+
+# Sort by absolute correlation for better visualization
+cor_life_expectancy_tidy <- cor_life_expectancy_tidy %>%
+  arrange(desc(abs(Correlation)))
+
+library(ggplot2)
+
+# Plot correlations as a bar chart
+ggplot(cor_life_expectancy_tidy, aes(x = reorder(Variable, Correlation), y = Correlation, fill = Correlation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limit = c(-1, 1), space = "Lab",
+    name = "Correlation"
+  ) +
+  coord_flip() +
+  labs(
+    title = "Correlation of Variables with Life Expectancy",
+    x = "Variable",
+    y = "Correlation"
+  ) +
+  theme_minimal()
+
+```
+
+```{r warning=FALSE}
+# Load necessary libraries
+library(caret)
+library(glmnet)
+library(randomForest)
+library(pROC)
+library(ggplot2)
+
+# Split the data into training and testing sets
+set.seed(123)  # For reproducibility
+train_index <- sample(1:nrow(data), 0.7 * nrow(data))
+train_data <- data[train_index, ]
+test_data <- data[-train_index, ]
+
+# Logistic Regression
+# Exclude 'Country' from predictors
+predictors <- setdiff(names(train_data), c("Life_Expectancy_Binary", "Life_Expectancy", "Country", "Year", "Population", "Economic_Status"))
+
+# Dynamically create the formula for Logistic Regression
+logistic_formula <- as.formula(paste("Life_Expectancy_Binary ~", paste(predictors, collapse = " + ")))
+
+# Fit Logistic Regression model
+logistic_model <- glm(logistic_formula, data = train_data, family = binomial)
+
+# Predict probabilities on the test set
+logistic_predictions <- predict(logistic_model, newdata = test_data, type = "response")
+
+# Ridge Regression
+X_train <- as.matrix(train_data[, -which(names(train_data) %in% c("Life_Expectancy_Binary", "Life_Expectancy", "Country", "Year", "Population", "Economic_Status"))])
+y_train <- train_data$Life_Expectancy_Binary
+X_test <- as.matrix(test_data[, -which(names(test_data) %in% c("Life_Expectancy_Binary", "Life_Expectancy", "Country", "Year", "Population", "Economic_Status"))])
+y_test <- test_data$Life_Expectancy_Binary
+
+ridge_model <- cv.glmnet(X_train, y_train, alpha = 0, family = "binomial")
+ridge_best_lambda <- ridge_model$lambda.min
+ridge_predictions <- predict(ridge_model, newx = X_test, s = ridge_best_lambda, type = "response")
+
+# Lasso Regression
+lasso_model <- cv.glmnet(X_train, y_train, alpha = 1, family = "binomial")
+lasso_best_lambda <- lasso_model$lambda.min
+lasso_predictions <- predict(lasso_model, newx = X_test, s = lasso_best_lambda, type = "response")
+
+
+```
+
+```{r}
+# ROC Curves for All Models
+roc_logistic <- roc(y_test, logistic_predictions)
+roc_ridge <- roc(y_test, ridge_predictions)
+roc_lasso <- roc(y_test, lasso_predictions)
+
+# Plot Combined ROC Curves
+plot(roc_logistic, main = "ROC Curves Comparison", col = "blue", lwd = 2)
+lines(roc_ridge, col = "purple", lwd = 2)
+lines(roc_lasso, col = "orange", lwd = 2)
+
+legend("bottomright", legend = c("Logistic Regression", "Ridge Regression", 
+                                 "Lasso Regression"), 
+       col = c("blue", "purple", "orange"), lwd = 2)
+
+```
+
+```{r}
+# Feature Importance for Ridge Regression
+ridge_coefficients <- coef(ridge_model, s = ridge_best_lambda)
+ridge_df <- data.frame(
+  Factor = rownames(ridge_coefficients)[-1],
+  Importance = abs(ridge_coefficients[-1, 1]),
+  Model = "Ridge Regression"
+)
+
+logistic_coefficients <- coef(logistic_model)
+logistic_df <- data.frame(
+  Factor = names(logistic_coefficients)[-1],  # Exclude the intercept
+  Importance = abs(logistic_coefficients[-1]),
+  Model = "Logistic Regression"
+)
+
+# Feature Importance for Lasso Regression
+lasso_coefficients <- coef(lasso_model, s = lasso_best_lambda)
+lasso_df <- data.frame(
+  Factor = rownames(lasso_coefficients)[-1],
+  Importance = abs(lasso_coefficients[-1, 1]),
+  Model = "Lasso Regression"
+)
+
+# Plotting Function for Feature Importance
+plot_importance <- function(data, title) {
+  ggplot(data, aes(x = reorder(Factor, Importance), y = Importance, fill = Factor)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    labs(title = title, x = "Factors", y = "Importance") +
+    theme_minimal() +
+    theme(legend.position = "none")
+}
+
+# Plot Individual Feature Importance
+print(plot_importance(logistic_df, "Factors Affecting Life Expectancy - Logistic Regression"))
+print(plot_importance(ridge_df, "Factors Affecting Life Expectancy - Ridge Regression"))
+print(plot_importance(lasso_df, "Factors Affecting Life Expectancy - Lasso Regression"))
+
+
+```
+
+```{r}
+# Combine Feature Importance DataFrames
+combined_df <- bind_rows(
+  logistic_df %>% mutate(Model = "Logistic Regression"),
+  ridge_df %>% mutate(Model = "Ridge Regression"),
+  lasso_df %>% mutate(Model = "Lasso Regression"),
+)
+
+# Summarize Importance Scores Across Models
+aggregated_importance <- combined_df %>%
+  group_by(Factor) %>%
+  summarise(
+    Total_Importance = sum(Importance, na.rm = TRUE), # Combine importance scores
+    Models_Appeared = n()  # Count how many models included the feature
+  ) %>%
+  arrange(desc(Total_Importance))  # Rank by total importance
+
+# Extract Top 7 Factors
+top_factors <- aggregated_importance %>%
+  slice(1:10)
+
+# View the Results
+print(top_factors)
+
+# Visualization of Top 10 Factors
+ggplot(top_factors, aes(x = reorder(Factor, Total_Importance), y = Total_Importance, fill = Factor)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Top 10 Factors Affecting Life Expectancy Across Models",
+    x = "Factors",
+    y = "Total Importance"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+
+```{r}
+# Calculate mean life expectancy for each class
+mean_life_expectancy <- aggregate(Life_Expectancy ~ Economic_Status, data = data, mean)
+print(mean_life_expectancy)
+```
+
+```{r}
+library(ggplot2)
+# Create a box plot for life expectancy by economic status
+ggplot(data, aes(x = Economic_Status, y = Life_Expectancy, fill = Economic_Status)) +
+  geom_boxplot() +
+  labs(title = "Box Plot of Life Expectancy by Economic Status", 
+       x = "Economic Status", 
+       y = "Life Expectancy") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+```{r}
+# Scatter plot of Life Expectancy vs. Schooling
+ggplot(data, aes(x = Schooling, y = Life_Expectancy)) +
+  geom_point(alpha = 0.6, color = "blue") +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  labs(title = "Scatter Plot of Life Expectancy vs. Schooling",
+       x = "Schooling (Years)",
+       y = "Life Expectancy") +
+  theme_minimal()
+
+```
+
+
+```{r}
+# Histogram of Life Expectancy
+ggplot(data, aes(x = Life_Expectancy)) +
+  geom_histogram(binwidth = 4, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Life Expectancy",
+       x = "Life Expectancy (Years)",
+       y = "Frequency") +
+  theme_minimal()
+
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+
+# Calculate the average life expectancy by year and status
+avg_life_expectancy_status <- data %>%
+  group_by(Year, Economic_Status) %>%
+  summarise(Average_Life_Expectancy = mean(Life_Expectancy, na.rm = TRUE)) %>%
+  ungroup()
+
+# Line plot of average life expectancy by year for developed vs. developing countries
+ggplot(avg_life_expectancy_status, aes(x = Year, y = Average_Life_Expectancy, color = Economic_Status, group = Economic_Status)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Average Life Expectancy Over the Years",
+    x = "Year",
+    y = "Average Life Expectancy",
+    color = "Country Status"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),
+    axis.title = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+
+```
+
+```{r}
+# Load the required library for maps
+library(ggplot2)
+library(rnaturalearth)
+library(sf)
+
+# Merge data with rnaturalearth data for mapping
+world <- ne_countries(returnclass = "sf")
+data_map <- merge(world, data, by.x = "name", by.y = "Country", all.x = TRUE)
+
+# Plot map
+ggplot(data_map) +
+  geom_sf(aes(fill = Life_Expectancy), color = "white") +
+  scale_fill_viridis_c(option = "C") +
+  labs(title = "Global Life Expectancy Map", fill = "Life Expectancy") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# Load necessary libraries
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(rnaturalearth)
+library(sf)
+library(tidyr)
+
+# Load the dataset
+data <- read.csv("Life Expectancy Data.csv")
+
+# Rename columns for clarity
+colnames(data) <- c("Country", "Year", "Economic_Status", "Life_Expectancy", "Adult_Mortality", 
+                    "Infant_Deaths", "Alcohol_Consumption", "Health_Expenditure", 
+                    "Hepatitis_B_Coverage", "Measles_Cases", "BMI", "Under_Five_Deaths", 
+                    "Polio_Coverage", "Total_Expenditure", "Diphtheria_Coverage", 
+                    "HIV_Prevalence", "GDP", "Population", "Thinness_10_19_Years", 
+                    "Thinness_5_9_Years", "Income_Resources", "Schooling")
+
+# Data Cleaning
+data <- data %>%
+  mutate(Year = as.factor(Year)) %>%
+  select(Country, Year, Economic_Status, Life_Expectancy, Adult_Mortality, 
+         Alcohol_Consumption, Schooling, GDP, HIV_Prevalence, Diphtheria_Coverage, Measles_Cases, Hepatitis_B_Coverage)
+
+# Load world shapefile for mapping
+world <- ne_countries(returnclass = "sf")
+
+# Convert the dataset to a vector of country names for lookup
+ne_country_names <- ne_countries$name
+
+# Clean up the country names in the data
+data$Country <- trimws(data$Country)  # Remove any extra spaces
+
+# Replace country names in your data based on the rnaturalearth data
+data$Country <- ifelse(data$Country %in% ne_country_names, data$Country,
+                       sapply(data$Country, function(x) {
+                         match <- grep(x, ne_country_names, value = TRUE, ignore.case = TRUE)
+                         if (length(match) > 0) match[1] else x
+                       }))
+
+# Manually map any known discrepancies
+data$Country <- recode(data$Country,
+                       "Russian Federation" = "Russia",
+                       "Côte d'Ivoire" = "Ivory Coast",
+                       "Syria Arab Republic" = "Syrian Arab Republic",
+                       "The former Yugoslav republic of Macedonia" = "North Macedonia",
+                       "Democratic People's Republic of Korea" = "North Korea",
+                       "Democratic Republic of the Congo" = "Congo (Kinshasa)",
+                       "Republic of Korea" = "South Korea",
+                       "Brunei Darussalam" = "Brunei",
+                       "St. Kitts and Nevis" = "Saint Kitts and Nevis",
+                       "St. Lucia" = "Saint Lucia",
+                       "St. Vincent and the Grenadines" = "Saint Vincent and the Grenadines",
+                       "Venezuela (Bolivarian Republic of)" = "Venezuela",
+                       "Lao People's Democratic Republic" = "Laos",
+                       "Tanzania, United Republic of" = "Tanzania",
+                       "Czechia" = "Czech Republic",
+                       "Palestine, State of" = "Palestine",
+                       "Myanmar (Burma)" = "Myanmar",
+                       "South Sudan" = "Sudan (South)")
+
+# Define UI
+ui <- fluidPage(
+  titlePanel("Life Expectancy Dashboard"),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput(
+        inputId = "selected_year",
+        label = "Select Year:",
+        choices = unique(data$Year),
+        selected = unique(data$Year)[1]
+      )
+    ),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Box Plot by Economic Status", 
+                 plotOutput("boxPlot")),
+        tabPanel("Global Map", 
+                 plotOutput("mapPlot"))
+      )
+    )
+  )
+)
+
+# Define server logic
+server <- function(input, output) {
+  # Filter data based on selected year
+  filtered_data <- reactive({
+    data %>% filter(Year == input$selected_year)
+  })
+
+  # Box Plot: Life Expectancy by Economic Status
+  output$boxPlot <- renderPlot({
+    ggplot(filtered_data(), aes(x = Economic_Status, y = Life_Expectancy, fill = Economic_Status)) +
+      geom_boxplot() +
+      labs(
+        title = paste("Life Expectancy by Economic Status (", input$selected_year, ")", sep = ""),
+        x = "Economic Status",
+        y = "Life Expectancy"
+      ) +
+      theme_minimal() +
+      theme(legend.position = "none")
+  })
+
+  # Global Map: Life Expectancy by Country
+  output$mapPlot <- renderPlot({
+    map_data <- merge(world, filtered_data(), by.x = "name", by.y = "Country", all.x = TRUE)
+
+    ggplot(map_data) +
+      geom_sf(aes(fill = Life_Expectancy), color = "white") +
+      scale_fill_viridis_c(option = "C", na.value = "grey50") +
+      labs(
+        title = paste("Global Life Expectancy Map (", input$selected_year, ")", sep = ""),
+        fill = "Life Expectancy"
+      ) +
+      theme_minimal()
+  })
+}
+
+# Run the app
+shinyApp(ui = ui, server = server)
+
+
+```
+
