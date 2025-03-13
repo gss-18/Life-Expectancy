@@ -121,4 +121,4 @@ Machine learning models provided insights into predictor importance and regional
 - Develop policy recommendations to address disparities in life expectancy.
 
 This research underscores the importance of economic stability, disease control, and education in promoting healthier populations worldwide. By addressing these factors, policymakers can implement more effective strategies to enhance global life expectancy outcomes.
-# Life-Expectancy
+
